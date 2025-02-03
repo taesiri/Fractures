@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="utf-8">
+    <title>Multi-Point Fracture Simulation</title>
+    <style>
+        body {
+            margin: 0;
+            background: #333;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 20px;
+            font-family: Arial, sans-serif;
+            color: white;
+        }
+
+        canvas {
+            display: block;
+            margin: 10px auto;
+            background: #fff;
+        }
+
+        .controls {
+            margin: 10px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 10px;
+        }
+
+        button {
+            padding: 8px 16px;
+            font-size: 14px;
+            cursor: pointer;
+            background: #4CAF50;
+            border: none;
+            color: white;
+            border-radius: 4px;
+        }
+
+        .slider-container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 5px;
+        }
+
+        input[type="range"] {
+            width: 200px;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="controls">
+        <div class="slider-container">
+            <label>Number of Impact Points: <span id="pointCount">2</span></label>
+            <input type="range" id="pointSlider" min="1" max="5" value="2">
+        </div>
+        <button onclick="generateNewPattern()">Generate New Pattern</button>
+    </div>
+    <canvas id="canvas" width="800" height="600"></canvas>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const slider = document.getElementById('pointSlider');
+        const pointCountDisplay = document.getElementById('pointCount');
+
+        // Returns a random point inside the rectangle
+        function getRandomPoint(bounds) {
+            return {
+                x: bounds.x1 + Math.random() * (bounds.x2 - bounds.x1),
+                y: bounds.y1 + Math.random() * (bounds.y2 - bounds.y1)
+            };
+        }
+
+        // Find intersection point of a line with rectangle boundaries
+        function findBoundaryIntersection(startPoint, angle, bounds) {
+            const cos = Math.cos(angle);
+            const sin = Math.sin(angle);
+
+            let intersections = [];
+
+            // Check intersection with top boundary
+            if (sin !== 0) {
+                const t = (bounds.y1 - startPoint.y) / sin;
+                const x = startPoint.x + t * cos;
+                if (t > 0 && x >= bounds.x1 && x <= bounds.x2) {
+                    intersections.push({ x, y: bounds.y1 });
+                }
+            }
+
+            // Check intersection with bottom boundary
+            if (sin !== 0) {
+                const t = (bounds.y2 - startPoint.y) / sin;
+                const x = startPoint.x + t * cos;
+                if (t > 0 && x >= bounds.x1 && x <= bounds.x2) {
+                    intersections.push({ x, y: bounds.y2 });
+                }
+            }
+
+            // Check intersection with left boundary
+            if (cos !== 0) {
+                const t = (bounds.x1 - startPoint.x) / cos;
+                const y = startPoint.y + t * sin;
+                if (t > 0 && y >= bounds.y1 && y <= bounds.y2) {
+                    intersections.push({ x: bounds.x1, y });
+                }
+            }
+
+            // Check intersection with right boundary
+            if (cos !== 0) {
+                const t = (bounds.x2 - startPoint.x) / cos;
+                const y = startPoint.y + t * sin;
+                if (t > 0 && y >= bounds.y1 && y <= bounds.y2) {
+                    intersections.push({ x: bounds.x2, y });
+                }
+            }
+
+            if (intersections.length === 0) return null;
+
+            return intersections.reduce((closest, current) => {
+                const currentDist = Math.hypot(current.x - startPoint.x, current.y - startPoint.y);
+                const closestDist = Math.hypot(closest.x - startPoint.x, closest.y - startPoint.y);
+                return currentDist < closestDist ? current : closest;
+            });
+        }
+
+        // Creates fracture lines from a point to boundaries
+        function createFractures(startPoint, bounds) {
+            const lines = [];
+            const numLines = Math.floor(Math.random() * 2) + 3; // 3-4 lines
+            const angleStep = (2 * Math.PI) / numLines;
+
+            for (let i = 0; i < numLines; i++) {
+                const baseAngle = i * angleStep;
+                // Random angle variation within π/3 of base angle
+                const angle = baseAngle + (Math.random() - 0.5) * Math.PI / 3;
+
+                const endPoint = findBoundaryIntersection(startPoint, angle, bounds);
+                if (endPoint) {
+                    lines.push({
+                        start: startPoint,
+                        end: endPoint
+                    });
+                }
+            }
+
+            return lines;
+        }
+
+        // Generate fracture points and their lines
+        function generateFracturePoints(bounds, numPoints) {
+            const points = [];
+            for (let i = 0; i < numPoints; i++) {
+                const point = getRandomPoint(bounds);
+                const lines = createFractures(point, bounds);
+                points.push({
+                    point,
+                    lines
+                });
+            }
+            return points;
+        }
+
+        // Draw the entire fracture pattern
+        function drawFracture() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            const bounds = {
+                x1: 100,
+                y1: 100,
+                x2: 700,
+                y2: 500
+            };
+
+            // Draw the main rectangle
+            ctx.fillStyle = '#fff';
+            ctx.strokeStyle = '#000';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.rect(bounds.x1, bounds.y1, bounds.x2 - bounds.x1, bounds.y2 - bounds.y1);
+            ctx.fill();
+            ctx.stroke();
+
+            const numPoints = parseInt(slider.value);
+            const points = generateFracturePoints(bounds, numPoints);
+
+            // Draw all fracture lines
+            ctx.strokeStyle = '#000';
+            ctx.lineWidth = 1;
+            points.forEach(fracture => {
+                fracture.lines.forEach(line => {
+                    ctx.beginPath();
+                    ctx.moveTo(line.start.x, line.start.y);
+                    ctx.lineTo(line.end.x, line.end.y);
+                    ctx.stroke();
+                });
+            });
+
+            // Draw impact points
+            points.forEach(fracture => {
+                ctx.beginPath();
+                ctx.arc(fracture.point.x, fracture.point.y, 4, 0, Math.PI * 2);
+                ctx.fillStyle = "red";
+                ctx.fill();
+            });
+        }
+
+        // Event handlers
+        function generateNewPattern() {
+            drawFracture();
+        }
+
+        slider.addEventListener('input', function () {
+            pointCountDisplay.textContent = this.value;
+            drawFracture();
+        });
+
+        canvas.addEventListener('click', generateNewPattern);
+
+        // Initial draw
+        drawFracture();
+    </script>
+</body>
+
+</html>
