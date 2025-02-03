@@ -3,7 +3,7 @@
 
 <head>
     <meta charset="utf-8">
-    <title>Interior-Point Fracturing with Adjustable Padding</title>
+    <title>Interactive Fracturing with Physics</title>
     <style>
         body {
             margin: 0;
@@ -28,6 +28,8 @@
             font-size: 16px;
         }
     </style>
+    <!-- Include Matter.js from CDN -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
 </head>
 
 <body>
@@ -47,11 +49,42 @@
     </div>
     <canvas id="canvas" width="800" height="600"></canvas>
     <script>
-        // --- Global variables ---
-        let currentShape = null;
-        let currentPieces = [];
+        // --- Matter.js Aliases ---
+        const Engine = Matter.Engine,
+            World = Matter.World,
+            Bodies = Matter.Bodies,
+            Body = Matter.Body,
+            Composite = Matter.Composite,
+            Mouse = Matter.Mouse,
+            MouseConstraint = Matter.MouseConstraint;
 
-        // --- Utility functions ---
+        // --- Create the Matter.js engine and world ---
+        let engine = Engine.create();
+        let world = engine.world;
+
+        // --- Get canvas and context ---
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        // --- Setup Mouse Constraint for interactivity ---
+        let mouse = Mouse.create(canvas);
+        let mouseConstraint = MouseConstraint.create(engine, {
+            mouse: mouse,
+            constraint: {
+                stiffness: 0.2,
+                render: { visible: false }
+            }
+        });
+        World.add(world, mouseConstraint);
+
+        // --- Create a ground so pieces don’t fall off ---
+        let ground = Bodies.rectangle(400, 610, 810, 60, { isStatic: true });
+        World.add(world, ground);
+
+        // --- Global storage for our fractured piece bodies ---
+        let pieceBodies = [];
+
+        // --- Utility Functions ---
         // Returns a random pastel-ish color.
         function getRandomColor() {
             const r = Math.floor(Math.random() * 200) + 55;
@@ -60,53 +93,35 @@
             return `rgb(${r},${g},${b})`;
         }
 
-        // Draws a polygon (given as an array of {x, y} points) on the canvas.
-        function drawPolygon(ctx, polygon, fillColor, strokeColor) {
-            if (polygon.length === 0) return;
-            ctx.beginPath();
-            ctx.moveTo(polygon[0].x, polygon[0].y);
-            for (let i = 1; i < polygon.length; i++) {
-                ctx.lineTo(polygon[i].x, polygon[i].y);
-            }
-            ctx.closePath();
-            ctx.fillStyle = fillColor;
-            ctx.fill();
-            ctx.strokeStyle = strokeColor;
-            ctx.stroke();
-        }
-
-        // --- Helper for "padding" (insetting) a polygon ---
-        // This function computes the centroid of the polygon and then moves each vertex
-        // toward the centroid by a fraction determined by the 'padding' value.
-        function shrinkPolygon(polygon, padding) {
-            // Compute centroid.
+        // Computes the centroid (average of vertices) of a polygon.
+        function computeCentroid(polygon) {
             let cx = 0, cy = 0;
             polygon.forEach(pt => {
                 cx += pt.x;
                 cy += pt.y;
             });
-            cx /= polygon.length;
-            cy /= polygon.length;
+            return { x: cx / polygon.length, y: cy / polygon.length };
+        }
 
-            // Compute average distance from the centroid.
+        // Shrinks (insets) a polygon by moving each vertex toward the centroid.
+        // 'padding' is in pixels.
+        function shrinkPolygon(polygon, padding) {
+            let centroid = computeCentroid(polygon);
+            // Compute average distance from centroid.
             let avgDist = 0;
             polygon.forEach(pt => {
-                avgDist += Math.hypot(pt.x - cx, pt.y - cy);
+                avgDist += Math.hypot(pt.x - centroid.x, pt.y - centroid.y);
             });
             avgDist /= polygon.length;
-
-            // Determine a shrink factor.
-            // If padding is too large relative to the average distance, factor clamps to 0.
+            // Clamp factor between 0 and 1.
             let factor = Math.max(0, 1 - (padding / avgDist));
-
-            // Return the shrunken polygon.
             return polygon.map(pt => ({
-                x: cx + (pt.x - cx) * factor,
-                y: cy + (pt.y - cy) * factor
+                x: centroid.x + (pt.x - centroid.x) * factor,
+                y: centroid.y + (pt.y - centroid.y) * factor
             }));
         }
 
-        // --- Point-in-polygon (ray-casting) ---
+        // Standard ray-casting point-in-polygon test.
         function pointInPolygon(point, polygon) {
             let inside = false;
             for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
@@ -119,7 +134,7 @@
             return inside;
         }
 
-        // --- Bounding box for a polygon ---
+        // Returns the bounding box of a polygon.
         function getBoundingBox(polygon) {
             let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
             polygon.forEach(pt => {
@@ -144,10 +159,8 @@
             return pt;
         }
 
-        // --- Intersection functions for polygons ---
-        // Given a ray starting at point P with angle (in radians),
-        // compute its intersection with all edges of the polygon.
-        // Returns the closest intersection (if any) along with the edge index.
+        // Given a ray from point P at angle (in radians) and a polygon,
+        // compute its intersection with each edge. Returns the closest intersection.
         function computeRayIntersectionPolygon(P, angle, shape) {
             const dx = Math.cos(angle);
             const dy = Math.sin(angle);
@@ -159,7 +172,7 @@
                 const B = vertices[(i + 1) % n];
                 const R = { x: B.x - A.x, y: B.y - A.y };
                 const denom = dx * R.y - dy * R.x;
-                if (Math.abs(denom) < 1e-6) continue; // Parallel or nearly so.
+                if (Math.abs(denom) < 1e-6) continue; // Parallel.
                 const t = ((A.x - P.x) * R.y - (A.y - P.y) * R.x) / denom;
                 const u = ((A.x - P.x) * dy - (A.y - P.y) * dx) / denom;
                 if (t > 1e-6 && u >= 0 && u <= 1) {
@@ -172,9 +185,8 @@
             return intersections[0];
         }
 
-        // Given two intersection objects (each with an edge index),
-        // return an array of the polygon’s vertices between them.
-        // (Works best when the polygon is convex or star-shaped.)
+        // Given two intersection objects, return the polygon vertices along the boundary between them.
+        // (This version works best when the shape is convex or star-shaped.)
         function getBoundarySegment(intersect1, intersect2, shape) {
             const vertices = shape.vertices;
             const n = vertices.length;
@@ -190,8 +202,9 @@
             return segment;
         }
 
-        // --- Shape creation functions ---
-        // Each shape is defined as an object with a "vertices" array.
+        // --- Shape Creation Functions ---
+        // Each shape is represented as an object with a "vertices" array.
+
         function createRectangle(x, y, width, height) {
             return {
                 vertices: [
@@ -203,7 +216,6 @@
             };
         }
 
-        // Approximates a circle as a polygon.
         function createCircle(center, radius, numSides) {
             let vertices = [];
             for (let i = 0; i < numSides; i++) {
@@ -216,7 +228,6 @@
             return { vertices: vertices };
         }
 
-        // Star shape with alternating outer and inner radii.
         function createStar(center, outerRadius, innerRadius, numPoints) {
             let vertices = [];
             let totalPoints = numPoints * 2;
@@ -232,7 +243,6 @@
             return { vertices: vertices };
         }
 
-        // Heart shape generated from a parametric equation.
         function createHeart(center, scale, numPoints) {
             let vertices = [];
             for (let i = 0; i < numPoints; i++) {
@@ -247,12 +257,11 @@
             return { vertices: vertices };
         }
 
-        // --- Fracturing function for a polygon ---
-        // Picks a random interior point and 4 rays, then uses the intersection points
-        // (and the boundary in between) to divide the shape into 4 pieces.
+        // --- Fracturing Function ---
+        // Uses an interior point and 4 rays to fracture a shape into 4 pieces.
         function fracturePolygon(shape) {
             const P = randomInteriorPoint(shape);
-            // Generate 4 random angles.
+            // Generate 4 random angles and sort them.
             let angles = [];
             for (let i = 0; i < 4; i++) {
                 angles.push(Math.random() * 2 * Math.PI);
@@ -284,66 +293,105 @@
             return pieces;
         }
 
-        // --- Drawing functions ---
-        // Redraws the canvas using the current shape and pieces,
-        // applying the current slider padding.
-        function drawAll() {
-            const canvas = document.getElementById('canvas');
-            const ctx = canvas.getContext('2d');
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
+        // --- Create Physics Bodies from Fractured Pieces ---
+        function createFracturedBodies() {
+            // Remove any existing piece bodies from the world.
+            pieceBodies.forEach(body => {
+                World.remove(world, body);
+            });
+            pieceBodies = [];
 
-            // Draw the original shape boundary.
-            ctx.lineWidth = 2;
-            ctx.strokeStyle = "#000";
-            if (currentShape) {
-                drawPolygon(ctx, currentShape.vertices, "rgba(0,0,0,0)", "#000");
+            // Choose the shape.
+            const shapeSelect = document.getElementById('shapeSelect');
+            const shapeType = shapeSelect.value;
+            let shape;
+            switch (shapeType) {
+                case "rectangle":
+                    shape = createRectangle(100, 100, 600, 400);
+                    break;
+                case "circle":
+                    shape = createCircle({ x: 400, y: 300 }, 200, 50);
+                    break;
+                case "star":
+                    shape = createStar({ x: 400, y: 300 }, 250, 100, 5);
+                    break;
+                case "heart":
+                    shape = createHeart({ x: 400, y: 300 }, 10, 200);
+                    break;
+                default:
+                    shape = createRectangle(100, 100, 600, 400);
             }
 
-            // Get the padding value from the slider.
+            // Get padding from the slider.
             const paddingSlider = document.getElementById('paddingSlider');
             const padding = Number(paddingSlider.value);
             document.getElementById('paddingValue').textContent = padding;
 
-            // Draw each fractured piece with the padded inset.
-            currentPieces.forEach(piece => {
-                const paddedPiece = shrinkPolygon(piece, padding);
-                drawPolygon(ctx, paddedPiece, getRandomColor(), "#000");
+            // Fracture the shape.
+            let pieces = fracturePolygon(shape);
+
+            // For each fractured piece, create a padded (inset) version and then a Matter body.
+            pieces.forEach(piece => {
+                let paddedPiece = shrinkPolygon(piece, padding);
+                let centroid = computeCentroid(paddedPiece);
+                // Transform vertices relative to the centroid.
+                let relativeVertices = paddedPiece.map(v => ({ x: v.x - centroid.x, y: v.y - centroid.y }));
+                // Create a physics body from the vertices.
+                let body = Bodies.fromVertices(centroid.x, centroid.y, [relativeVertices],
+                    { restitution: 0.5, friction: 0.1, density: 0.001 },
+                    true);
+                // Assign a custom color for rendering.
+                body.customColor = getRandomColor();
+                pieceBodies.push(body);
+                World.add(world, body);
             });
         }
 
-        // Computes a new fracturing of the shape based on the dropdown selection.
-        function main() {
-            const shapeSelect = document.getElementById('shapeSelect');
-            const shapeType = shapeSelect.value;
-            switch (shapeType) {
-                case "rectangle":
-                    currentShape = createRectangle(100, 100, 600, 400);
-                    break;
-                case "circle":
-                    currentShape = createCircle({ x: 400, y: 300 }, 200, 50);
-                    break;
-                case "star":
-                    currentShape = createStar({ x: 400, y: 300 }, 250, 100, 5);
-                    break;
-                case "heart":
-                    currentShape = createHeart({ x: 400, y: 300 }, 10, 200);
-                    break;
-                default:
-                    currentShape = createRectangle(100, 100, 600, 400);
+        // --- Rendering Loop ---
+        function update() {
+            Engine.update(engine, 1000 / 60);
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // Draw each fractured piece (using body.vertices provided by Matter.js).
+            pieceBodies.forEach(body => {
+                ctx.beginPath();
+                let verts = body.vertices;
+                ctx.moveTo(verts[0].x, verts[0].y);
+                for (let i = 1; i < verts.length; i++) {
+                    ctx.lineTo(verts[i].x, verts[i].y);
+                }
+                ctx.closePath();
+                ctx.fillStyle = body.customColor || '#ccc';
+                ctx.fill();
+                ctx.strokeStyle = '#000';
+                ctx.stroke();
+            });
+
+            // (Optional) Draw the ground.
+            ctx.beginPath();
+            let gVerts = ground.vertices;
+            ctx.moveTo(gVerts[0].x, gVerts[0].y);
+            for (let i = 1; i < gVerts.length; i++) {
+                ctx.lineTo(gVerts[i].x, gVerts[i].y);
             }
-            currentPieces = fracturePolygon(currentShape);
-            drawAll();
+            ctx.closePath();
+            ctx.fillStyle = "#888";
+            ctx.fill();
+            ctx.strokeStyle = "#000";
+            ctx.stroke();
+
+            requestAnimationFrame(update);
         }
 
         // --- Event Listeners ---
-        window.onload = function () {
-            main();
-            document.getElementById('fractureButton').addEventListener('click', main);
-            // When the slider changes, update the drawing using the same fracturing.
-            document.getElementById('paddingSlider').addEventListener('input', drawAll);
-            // (Optional) Update fracturing when the shape selection changes.
-            document.getElementById('shapeSelect').addEventListener('change', main);
-        };
+        document.getElementById('fractureButton').addEventListener('click', createFracturedBodies);
+        // Optionally re-run fracturing when the padding slider changes.
+        document.getElementById('paddingSlider').addEventListener('input', createFracturedBodies);
+        document.getElementById('shapeSelect').addEventListener('change', createFracturedBodies);
+
+        // Start the simulation loop.
+        createFracturedBodies();
+        update();
     </script>
 </body>
 
