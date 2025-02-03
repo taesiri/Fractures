@@ -3,7 +3,7 @@
 
 <head>
     <meta charset="utf-8">
-    <title>Multi-Point Fracture Simulation</title>
+    <title>Multi-Shape Fracture Simulation</title>
     <style>
         body {
             margin: 0;
@@ -40,6 +40,12 @@
             border-radius: 4px;
         }
 
+        select {
+            padding: 8px;
+            font-size: 14px;
+            border-radius: 4px;
+        }
+
         .slider-container {
             display: flex;
             flex-direction: column;
@@ -55,6 +61,10 @@
 
 <body>
     <div class="controls">
+        <select id="shapeSelect">
+            <option value="rectangle">Rectangle</option>
+            <option value="circle">Circle</option>
+        </select>
         <div class="slider-container">
             <label>Number of Impact Points: <span id="pointCount">2</span></label>
             <input type="range" id="pointSlider" min="1" max="5" value="2">
@@ -67,66 +77,147 @@
         const canvas = document.getElementById('canvas');
         const ctx = canvas.getContext('2d');
         const slider = document.getElementById('pointSlider');
+        const shapeSelect = document.getElementById('shapeSelect');
         const pointCountDisplay = document.getElementById('pointCount');
 
-        // Returns a random point inside the rectangle
-        function getRandomPoint(bounds) {
-            return {
-                x: bounds.x1 + Math.random() * (bounds.x2 - bounds.x1),
-                y: bounds.y1 + Math.random() * (bounds.y2 - bounds.y1)
-            };
-        }
+        // Shape definitions
+        const shapes = {
+            rectangle: {
+                draw: (ctx, x, y, width, height) => {
+                    ctx.beginPath();
+                    ctx.rect(x, y, width, height);
+                    ctx.fill();
+                    ctx.stroke();
+                },
+                bounds: { x1: 100, y1: 100, x2: 700, y2: 500 },
+                isInside: (point, bounds) => {
+                    return point.x >= bounds.x1 && point.x <= bounds.x2 &&
+                        point.y >= bounds.y1 && point.y <= bounds.y2;
+                },
+                findIntersection: (startPoint, angle, bounds) => {
+                    const cos = Math.cos(angle);
+                    const sin = Math.sin(angle);
+                    let intersections = [];
 
-        // Find intersection point of a line with rectangle boundaries
-        function findBoundaryIntersection(startPoint, angle, bounds) {
-            const cos = Math.cos(angle);
-            const sin = Math.sin(angle);
+                    // Check all four sides of the rectangle
+                    if (sin !== 0) {
+                        // Top
+                        const t1 = (bounds.y1 - startPoint.y) / sin;
+                        const x1 = startPoint.x + t1 * cos;
+                        if (t1 > 0 && x1 >= bounds.x1 && x1 <= bounds.x2) {
+                            intersections.push({ x: x1, y: bounds.y1 });
+                        }
+                        // Bottom
+                        const t2 = (bounds.y2 - startPoint.y) / sin;
+                        const x2 = startPoint.x + t2 * cos;
+                        if (t2 > 0 && x2 >= bounds.x1 && x2 <= bounds.x2) {
+                            intersections.push({ x: x2, y: bounds.y2 });
+                        }
+                    }
+                    if (cos !== 0) {
+                        // Left
+                        const t3 = (bounds.x1 - startPoint.x) / cos;
+                        const y3 = startPoint.y + t3 * sin;
+                        if (t3 > 0 && y3 >= bounds.y1 && y3 <= bounds.y2) {
+                            intersections.push({ x: bounds.x1, y: y3 });
+                        }
+                        // Right
+                        const t4 = (bounds.x2 - startPoint.x) / cos;
+                        const y4 = startPoint.y + t4 * sin;
+                        if (t4 > 0 && y4 >= bounds.y1 && y4 <= bounds.y2) {
+                            intersections.push({ x: bounds.x2, y: y4 });
+                        }
+                    }
 
-            let intersections = [];
+                    return getClosestPoint(startPoint, intersections);
+                }
+            },
+            circle: {
+                draw: (ctx, x, y, width, height) => {
+                    const centerX = x + width / 2;
+                    const centerY = y + height / 2;
+                    const radius = Math.min(width, height) / 2;
 
-            // Check intersection with top boundary
-            if (sin !== 0) {
-                const t = (bounds.y1 - startPoint.y) / sin;
-                const x = startPoint.x + t * cos;
-                if (t > 0 && x >= bounds.x1 && x <= bounds.x2) {
-                    intersections.push({ x, y: bounds.y1 });
+                    ctx.beginPath();
+                    ctx.arc(centerX, centerY, radius, 0, 2 * Math.PI);
+                    ctx.fill();
+                    ctx.stroke();
+                },
+                bounds: { x1: 200, y1: 100, x2: 600, y2: 500 },
+                isInside: (point, bounds) => {
+                    const centerX = (bounds.x1 + bounds.x2) / 2;
+                    const centerY = (bounds.y1 + bounds.y2) / 2;
+                    const radius = Math.min(bounds.x2 - bounds.x1, bounds.y2 - bounds.y1) / 2;
+                    const dx = point.x - centerX;
+                    const dy = point.y - centerY;
+                    return (dx * dx + dy * dy) <= radius * radius;
+                },
+                findIntersection: (startPoint, angle, bounds) => {
+                    const centerX = (bounds.x1 + bounds.x2) / 2;
+                    const centerY = (bounds.y1 + bounds.y2) / 2;
+                    const radius = Math.min(bounds.x2 - bounds.x1, bounds.y2 - bounds.y1) / 2;
+
+                    // Vector from center to start point
+                    const dx = startPoint.x - centerX;
+                    const dy = startPoint.y - centerY;
+
+                    // Direction vector
+                    const dirX = Math.cos(angle);
+                    const dirY = Math.sin(angle);
+
+                    // Quadratic equation coefficients: at² + bt + c = 0
+                    const a = dirX * dirX + dirY * dirY;
+                    const b = 2 * (dx * dirX + dy * dirY);
+                    const c = dx * dx + dy * dy - radius * radius;
+
+                    // Solve quadratic equation
+                    const discriminant = b * b - 4 * a * c;
+                    if (discriminant < 0) return null;
+
+                    const t1 = (-b + Math.sqrt(discriminant)) / (2 * a);
+                    const t2 = (-b - Math.sqrt(discriminant)) / (2 * a);
+
+                    // Get intersection points
+                    const intersections = [];
+                    if (t1 > 0) {
+                        intersections.push({
+                            x: startPoint.x + dirX * t1,
+                            y: startPoint.y + dirY * t1
+                        });
+                    }
+                    if (t2 > 0) {
+                        intersections.push({
+                            x: startPoint.x + dirX * t2,
+                            y: startPoint.y + dirY * t2
+                        });
+                    }
+
+                    return getClosestPoint(startPoint, intersections);
                 }
             }
+        };
 
-            // Check intersection with bottom boundary
-            if (sin !== 0) {
-                const t = (bounds.y2 - startPoint.y) / sin;
-                const x = startPoint.x + t * cos;
-                if (t > 0 && x >= bounds.x1 && x <= bounds.x2) {
-                    intersections.push({ x, y: bounds.y2 });
-                }
-            }
-
-            // Check intersection with left boundary
-            if (cos !== 0) {
-                const t = (bounds.x1 - startPoint.x) / cos;
-                const y = startPoint.y + t * sin;
-                if (t > 0 && y >= bounds.y1 && y <= bounds.y2) {
-                    intersections.push({ x: bounds.x1, y });
-                }
-            }
-
-            // Check intersection with right boundary
-            if (cos !== 0) {
-                const t = (bounds.x2 - startPoint.x) / cos;
-                const y = startPoint.y + t * sin;
-                if (t > 0 && y >= bounds.y1 && y <= bounds.y2) {
-                    intersections.push({ x: bounds.x2, y });
-                }
-            }
-
-            if (intersections.length === 0) return null;
-
-            return intersections.reduce((closest, current) => {
+        // Helper function to get closest point from a list
+        function getClosestPoint(startPoint, points) {
+            if (points.length === 0) return null;
+            return points.reduce((closest, current) => {
                 const currentDist = Math.hypot(current.x - startPoint.x, current.y - startPoint.y);
                 const closestDist = Math.hypot(closest.x - startPoint.x, closest.y - startPoint.y);
                 return currentDist < closestDist ? current : closest;
             });
+        }
+
+        // Returns a random point inside the current shape
+        function getRandomPoint(bounds) {
+            const currentShape = shapes[shapeSelect.value];
+            let point;
+            do {
+                point = {
+                    x: bounds.x1 + Math.random() * (bounds.x2 - bounds.x1),
+                    y: bounds.y1 + Math.random() * (bounds.y2 - bounds.y1)
+                };
+            } while (!currentShape.isInside(point, bounds));
+            return point;
         }
 
         // Creates fracture lines from a point to boundaries
@@ -134,13 +225,13 @@
             const lines = [];
             const numLines = Math.floor(Math.random() * 2) + 3; // 3-4 lines
             const angleStep = (2 * Math.PI) / numLines;
+            const currentShape = shapes[shapeSelect.value];
 
             for (let i = 0; i < numLines; i++) {
                 const baseAngle = i * angleStep;
-                // Random angle variation within π/3 of base angle
                 const angle = baseAngle + (Math.random() - 0.5) * Math.PI / 3;
 
-                const endPoint = findBoundaryIntersection(startPoint, angle, bounds);
+                const endPoint = currentShape.findIntersection(startPoint, angle, bounds);
                 if (endPoint) {
                     lines.push({
                         start: startPoint,
@@ -170,21 +261,20 @@
         function drawFracture() {
             ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-            const bounds = {
-                x1: 100,
-                y1: 100,
-                x2: 700,
-                y2: 500
-            };
+            const currentShape = shapes[shapeSelect.value];
+            const bounds = currentShape.bounds;
 
-            // Draw the main rectangle
+            // Draw the main shape
             ctx.fillStyle = '#fff';
             ctx.strokeStyle = '#000';
             ctx.lineWidth = 2;
-            ctx.beginPath();
-            ctx.rect(bounds.x1, bounds.y1, bounds.x2 - bounds.x1, bounds.y2 - bounds.y1);
-            ctx.fill();
-            ctx.stroke();
+            currentShape.draw(
+                ctx,
+                bounds.x1,
+                bounds.y1,
+                bounds.x2 - bounds.x1,
+                bounds.y2 - bounds.y1
+            );
 
             const numPoints = parseInt(slider.value);
             const points = generateFracturePoints(bounds, numPoints);
@@ -220,6 +310,7 @@
             drawFracture();
         });
 
+        shapeSelect.addEventListener('change', drawFracture);
         canvas.addEventListener('click', generateNewPattern);
 
         // Initial draw

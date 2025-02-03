@@ -3,7 +3,7 @@
 
 <head>
     <meta charset="utf-8">
-    <title>Interior-Point Fracturing for Various Shapes</title>
+    <title>Interior-Point Fracturing with Adjustable Padding</title>
     <style>
         body {
             margin: 0;
@@ -19,6 +19,13 @@
         #controls {
             text-align: center;
             margin: 10px;
+            color: #fff;
+        }
+
+        #controls label,
+        #controls select,
+        #controls button {
+            font-size: 16px;
         }
     </style>
 </head>
@@ -33,11 +40,18 @@
             <option value="heart">Heart</option>
         </select>
         <button id="fractureButton">Fracture!</button>
+        <br><br>
+        <label for="paddingSlider">Padding: </label>
+        <input type="range" id="paddingSlider" min="0" max="50" value="10">
+        <span id="paddingValue">10</span> px
     </div>
     <canvas id="canvas" width="800" height="600"></canvas>
     <script>
-        // --- Utility functions ---
+        // --- Global variables ---
+        let currentShape = null;
+        let currentPieces = [];
 
+        // --- Utility functions ---
         // Returns a random pastel-ish color.
         function getRandomColor() {
             const r = Math.floor(Math.random() * 200) + 55;
@@ -61,7 +75,38 @@
             ctx.stroke();
         }
 
-        // Point-in-polygon using the ray-casting algorithm.
+        // --- Helper for "padding" (insetting) a polygon ---
+        // This function computes the centroid of the polygon and then moves each vertex
+        // toward the centroid by a fraction determined by the 'padding' value.
+        function shrinkPolygon(polygon, padding) {
+            // Compute centroid.
+            let cx = 0, cy = 0;
+            polygon.forEach(pt => {
+                cx += pt.x;
+                cy += pt.y;
+            });
+            cx /= polygon.length;
+            cy /= polygon.length;
+
+            // Compute average distance from the centroid.
+            let avgDist = 0;
+            polygon.forEach(pt => {
+                avgDist += Math.hypot(pt.x - cx, pt.y - cy);
+            });
+            avgDist /= polygon.length;
+
+            // Determine a shrink factor.
+            // If padding is too large relative to the average distance, factor clamps to 0.
+            let factor = Math.max(0, 1 - (padding / avgDist));
+
+            // Return the shrunken polygon.
+            return polygon.map(pt => ({
+                x: cx + (pt.x - cx) * factor,
+                y: cy + (pt.y - cy) * factor
+            }));
+        }
+
+        // --- Point-in-polygon (ray-casting) ---
         function pointInPolygon(point, polygon) {
             let inside = false;
             for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
@@ -74,7 +119,7 @@
             return inside;
         }
 
-        // Compute the bounding box of a polygon.
+        // --- Bounding box for a polygon ---
         function getBoundingBox(polygon) {
             let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
             polygon.forEach(pt => {
@@ -100,11 +145,9 @@
         }
 
         // --- Intersection functions for polygons ---
-
         // Given a ray starting at point P with angle (in radians),
         // compute its intersection with all edges of the polygon.
-        // Returns the closest intersection (if any) along with the edge index and
-        // a parameter (u) showing where on the edge the intersection occurred.
+        // Returns the closest intersection (if any) along with the edge index.
         function computeRayIntersectionPolygon(P, angle, shape) {
             const dx = Math.cos(angle);
             const dy = Math.sin(angle);
@@ -129,16 +172,15 @@
             return intersections[0];
         }
 
-        // Given two intersection objects (each with an edge index and a position on the edge),
+        // Given two intersection objects (each with an edge index),
         // return an array of the polygon’s vertices between them.
-        // (This simple version assumes the polygon is convex.)
+        // (Works best when the polygon is convex or star-shaped.)
         function getBoundarySegment(intersect1, intersect2, shape) {
             const vertices = shape.vertices;
             const n = vertices.length;
             let segment = [];
             const startEdge = intersect1.edgeIndex;
             const endEdge = intersect2.edgeIndex;
-            // If both intersections occur on the same edge, no vertices lie between.
             if (startEdge === endEdge) return segment;
             let i = (startEdge + 1) % n;
             while (i !== (endEdge + 1) % n) {
@@ -149,9 +191,7 @@
         }
 
         // --- Shape creation functions ---
-        // Define shapes by returning an object with a "vertices" array.
-
-        // Rectangle.
+        // Each shape is defined as an object with a "vertices" array.
         function createRectangle(x, y, width, height) {
             return {
                 vertices: [
@@ -163,7 +203,7 @@
             };
         }
 
-        // Circle approximated as a polygon.
+        // Approximates a circle as a polygon.
         function createCircle(center, radius, numSides) {
             let vertices = [];
             for (let i = 0; i < numSides; i++) {
@@ -208,9 +248,8 @@
         }
 
         // --- Fracturing function for a polygon ---
-        // This function picks a random interior point and 4 rays,
-        // then uses the intersection points (and the boundary in between)
-        // to divide the shape into 4 pieces.
+        // Picks a random interior point and 4 rays, then uses the intersection points
+        // (and the boundary in between) to divide the shape into 4 pieces.
         function fracturePolygon(shape) {
             const P = randomInteriorPoint(shape);
             // Generate 4 random angles.
@@ -245,49 +284,65 @@
             return pieces;
         }
 
-        // --- Main drawing routine ---
-        function main() {
+        // --- Drawing functions ---
+        // Redraws the canvas using the current shape and pieces,
+        // applying the current slider padding.
+        function drawAll() {
             const canvas = document.getElementById('canvas');
             const ctx = canvas.getContext('2d');
             ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-            // Choose a shape based on the dropdown selection.
-            const shapeSelect = document.getElementById('shapeSelect');
-            const shapeType = shapeSelect.value;
-            let shape;
-            switch (shapeType) {
-                case "rectangle":
-                    shape = createRectangle(100, 100, 600, 400);
-                    break;
-                case "circle":
-                    shape = createCircle({ x: 400, y: 300 }, 200, 50);
-                    break;
-                case "star":
-                    shape = createStar({ x: 400, y: 300 }, 250, 100, 5);
-                    break;
-                case "heart":
-                    shape = createHeart({ x: 400, y: 300 }, 10, 200);
-                    break;
-                default:
-                    shape = createRectangle(100, 100, 600, 400);
-            }
-
             // Draw the original shape boundary.
             ctx.lineWidth = 2;
             ctx.strokeStyle = "#000";
-            drawPolygon(ctx, shape.vertices, "rgba(0,0,0,0)", "#000");
+            if (currentShape) {
+                drawPolygon(ctx, currentShape.vertices, "rgba(0,0,0,0)", "#000");
+            }
 
-            // Fracture the shape using our interior-point method.
-            const pieces = fracturePolygon(shape);
-            pieces.forEach(piece => {
-                drawPolygon(ctx, piece, getRandomColor(), "#000");
+            // Get the padding value from the slider.
+            const paddingSlider = document.getElementById('paddingSlider');
+            const padding = Number(paddingSlider.value);
+            document.getElementById('paddingValue').textContent = padding;
+
+            // Draw each fractured piece with the padded inset.
+            currentPieces.forEach(piece => {
+                const paddedPiece = shrinkPolygon(piece, padding);
+                drawPolygon(ctx, paddedPiece, getRandomColor(), "#000");
             });
         }
 
-        // Run when the page loads and when the button is clicked.
+        // Computes a new fracturing of the shape based on the dropdown selection.
+        function main() {
+            const shapeSelect = document.getElementById('shapeSelect');
+            const shapeType = shapeSelect.value;
+            switch (shapeType) {
+                case "rectangle":
+                    currentShape = createRectangle(100, 100, 600, 400);
+                    break;
+                case "circle":
+                    currentShape = createCircle({ x: 400, y: 300 }, 200, 50);
+                    break;
+                case "star":
+                    currentShape = createStar({ x: 400, y: 300 }, 250, 100, 5);
+                    break;
+                case "heart":
+                    currentShape = createHeart({ x: 400, y: 300 }, 10, 200);
+                    break;
+                default:
+                    currentShape = createRectangle(100, 100, 600, 400);
+            }
+            currentPieces = fracturePolygon(currentShape);
+            drawAll();
+        }
+
+        // --- Event Listeners ---
         window.onload = function () {
             main();
             document.getElementById('fractureButton').addEventListener('click', main);
+            // When the slider changes, update the drawing using the same fracturing.
+            document.getElementById('paddingSlider').addEventListener('input', drawAll);
+            // (Optional) Update fracturing when the shape selection changes.
+            document.getElementById('shapeSelect').addEventListener('change', main);
         };
     </script>
 </body>
