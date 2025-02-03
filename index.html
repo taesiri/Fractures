@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="utf-8">
+    <title>Interior-Point Fracturing</title>
+    <style>
+        body {
+            margin: 0;
+            background: #333;
+        }
+
+        canvas {
+            display: block;
+            margin: auto;
+            background: #fff;
+        }
+    </style>
+</head>
+
+<body>
+    <canvas id="canvas" width="800" height="600"></canvas>
+    <script>
+        // --- Utility functions ---
+
+        // Returns a random pastel-ish color.
+        function getRandomColor() {
+            const r = Math.floor(Math.random() * 200) + 55;
+            const g = Math.floor(Math.random() * 200) + 55;
+            const b = Math.floor(Math.random() * 200) + 55;
+            return `rgb(${r},${g},${b})`;
+        }
+
+        // Draws a polygon (given as an array of {x, y} points) on the canvas.
+        function drawPolygon(ctx, polygon, fillColor, strokeColor) {
+            if (polygon.length === 0) return;
+            ctx.beginPath();
+            ctx.moveTo(polygon[0].x, polygon[0].y);
+            for (let i = 1; i < polygon.length; i++) {
+                ctx.lineTo(polygon[i].x, polygon[i].y);
+            }
+            ctx.closePath();
+            ctx.fillStyle = fillColor;
+            ctx.fill();
+            ctx.strokeStyle = strokeColor;
+            ctx.stroke();
+        }
+
+        // --- Rectangle & Intersection Helpers ---
+
+        // Our rectangle definition.
+        const rect = {
+            left: 100,
+            top: 100,
+            right: 700,
+            bottom: 500,
+            // List of corner vertices (clockwise order)
+            corners: [
+                { x: 100, y: 100 }, // top-left
+                { x: 700, y: 100 }, // top-right
+                { x: 700, y: 500 }, // bottom-right
+                { x: 100, y: 500 }  // bottom-left
+            ]
+        };
+
+        // Returns a random point strictly inside the rectangle.
+        function randomInteriorPoint(rect) {
+            const x = rect.left + Math.random() * (rect.right - rect.left);
+            const y = rect.top + Math.random() * (rect.bottom - rect.top);
+            return { x, y };
+        }
+
+        // Given a ray from point P in direction 'angle' (in radians),
+        // compute its intersection with the rectangle boundaries.
+        // Returns an object { point: {x,y}, t, edge } where 'edge'
+        // is 0 for top, 1 for right, 2 for bottom, 3 for left.
+        function computeRayIntersection(P, angle, rect) {
+            const dx = Math.cos(angle);
+            const dy = Math.sin(angle);
+            let intersections = [];
+
+            // Top edge: y = rect.top (if dy != 0)
+            if (Math.abs(dy) > 1e-6) {
+                const tTop = (rect.top - P.y) / dy;
+                if (tTop > 0) {
+                    const x = P.x + tTop * dx;
+                    if (x >= rect.left - 1e-6 && x <= rect.right + 1e-6) {
+                        intersections.push({ t: tTop, point: { x, y: rect.top }, edge: 0 });
+                    }
+                }
+            }
+            // Bottom edge: y = rect.bottom
+            if (Math.abs(dy) > 1e-6) {
+                const tBottom = (rect.bottom - P.y) / dy;
+                if (tBottom > 0) {
+                    const x = P.x + tBottom * dx;
+                    if (x >= rect.left - 1e-6 && x <= rect.right + 1e-6) {
+                        intersections.push({ t: tBottom, point: { x, y: rect.bottom }, edge: 2 });
+                    }
+                }
+            }
+            // Left edge: x = rect.left
+            if (Math.abs(dx) > 1e-6) {
+                const tLeft = (rect.left - P.x) / dx;
+                if (tLeft > 0) {
+                    const y = P.y + tLeft * dy;
+                    if (y >= rect.top - 1e-6 && y <= rect.bottom + 1e-6) {
+                        intersections.push({ t: tLeft, point: { x: rect.left, y }, edge: 3 });
+                    }
+                }
+            }
+            // Right edge: x = rect.right
+            if (Math.abs(dx) > 1e-6) {
+                const tRight = (rect.right - P.x) / dx;
+                if (tRight > 0) {
+                    const y = P.y + tRight * dy;
+                    if (y >= rect.top - 1e-6 && y <= rect.bottom + 1e-6) {
+                        intersections.push({ t: tRight, point: { x: rect.right, y }, edge: 1 });
+                    }
+                }
+            }
+
+            // Pick the intersection with the smallest positive t.
+            if (intersections.length === 0) return null;
+            intersections.sort((a, b) => a.t - b.t);
+            return intersections[0];
+        }
+
+        // Given two points on the rectangle boundary (each with an 'edge' property),
+        // return an array of the rectangle’s corner vertices (if any) that lie between them.
+        // We assume the rectangle’s corners are in clockwise order: 
+        // 0: top-left, 1: top-right, 2: bottom-right, 3: bottom-left.
+        function getBoundarySegment(pStart, pEnd, rect) {
+            // Determine the order along the rectangle boundary (clockwise).
+            // We'll define a helper to “normalize” an edge index.
+            // pStart.edge and pEnd.edge are integers 0-3 where we assign:
+            //   0: top, 1: right, 2: bottom, 3: left.
+            let seg = [];
+            let startEdge = pStart.edge;
+            let endEdge = pEnd.edge;
+            // Compute how many full edges are between start and end (clockwise)
+            // If endEdge is "before" startEdge, add 4.
+            let diff = (endEdge - startEdge + 4) % 4;
+            // If the two points are on the same edge, no full corner is between.
+            if (diff === 0) return seg;
+            // Otherwise, for each full edge between start and end, add the corner vertex.
+            // Our rectangle.corners array is ordered: 
+            // [top-left (edge between left and top), top-right (edge between top and right),
+            //  bottom-right (edge between right and bottom), bottom-left (edge between bottom and left)]
+            for (let i = 1; i <= diff; i++) {
+                const cornerIndex = (startEdge + i) % 4;
+                seg.push(rect.corners[cornerIndex]);
+            }
+            return seg;
+        }
+
+        // --- Main fracturing function ---
+        // This function uses a random interior point and 4 random rays.
+        // It returns an array of 4 pieces (each a polygon represented by an array of points).
+        function fractureRectangle(rect) {
+            const P = randomInteriorPoint(rect);
+
+            // Generate 4 random angles in [0, 2π) and sort them.
+            let angles = [];
+            for (let i = 0; i < 4; i++) {
+                angles.push(Math.random() * 2 * Math.PI);
+            }
+            angles.sort((a, b) => a - b);
+
+            // For each angle, compute the intersection with the rectangle.
+            let intersections = [];
+            for (let angle of angles) {
+                const result = computeRayIntersection(P, angle, rect);
+                if (result) {
+                    // Store the angle and intersection info.
+                    intersections.push({ angle, point: result.point, edge: result.edge });
+                }
+            }
+
+            // In case something went wrong (shouldn't happen), bail out.
+            if (intersections.length < 4) return [];
+
+            // (They are already sorted by angle since we sorted the angles.)
+            // Build 4 pieces. For each piece, from intersection[i] to intersection[i+1] (wrap-around):
+            let pieces = [];
+            for (let i = 0; i < 4; i++) {
+                const curr = intersections[i];
+                const next = intersections[(i + 1) % 4];
+                // Get any rectangle corners between these intersections (in clockwise order).
+                const boundarySegment = getBoundarySegment(curr, next, rect);
+                // Build the piece polygon.
+                // Order: start at P, go to the current intersection, then along the boundary segment, then the next intersection.
+                let poly = [];
+                poly.push(P);
+                poly.push(curr.point);
+                // Append boundary vertices (if any)
+                boundarySegment.forEach(v => poly.push(v));
+                poly.push(next.point);
+                // (Closing the polygon will automatically add the segment from next.point back to P)
+                pieces.push(poly);
+            }
+            return pieces;
+        }
+
+        // --- Main drawing routine ---
+        function main() {
+            const canvas = document.getElementById('canvas');
+            const ctx = canvas.getContext('2d');
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // Draw the original rectangle (for reference)
+            ctx.strokeStyle = "#000";
+            ctx.lineWidth = 2;
+            ctx.strokeRect(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top);
+
+            // Fracture the rectangle using our interior-point approach.
+            const pieces = fractureRectangle(rect);
+
+            // Draw each fractured piece with a random fill.
+            pieces.forEach(piece => {
+                drawPolygon(ctx, piece, getRandomColor(), "#000");
+            });
+        }
+
+        // Run when the page loads, and re-run on canvas click.
+        window.onload = main;
+        document.getElementById('canvas').addEventListener('click', main);
+    </script>
+</body>
+
+</html>
